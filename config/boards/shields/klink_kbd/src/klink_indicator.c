@@ -15,6 +15,7 @@
 #include <zmk/events/hid_indicators_changed.h>
 #include <zmk/keymap.h>
 #include <zmk/split/bluetooth/peripheral.h>
+#include <zmk/usb.h>
 
 #include <math.h>
 
@@ -171,14 +172,14 @@ void led_process_thread(void) {
                     case 3:
                         if (indicator_state.connection != 2) {
                             bt_addr_le_t *addr = zmk_ble_active_profile_addr();
-                            if ( bt_addr_le_eq(addr, BT_ADDR_LE_ANY) ) set_indicator_color(0b001);
+                            if ( bt_addr_le_eq(addr, BT_ADDR_LE_ANY) ) set_indicator_color(0b001); //red color
                             else set_indicator_color(0b100); //blue color
                         }
                         break;
                 }
                 if (indicator_state.flash_times == 0) indicator_state.connection = 0;
             }
-        } else if (indicator_state.battery < 10) {
+        } else if ( (indicator_state.battery <= 10) && (zmk_usb_is_powered() == 0) ) {
             if ((led_timer_steps & 0x1f) == 0xf) set_indicator_color(0b001);
             else if ((led_timer_steps & 0x1f) == 0x1f) set_indicator_color(0);
         } else {
