@@ -13,6 +13,7 @@
 #include <zmk/events/split_peripheral_status_changed.h>
 #include <zmk/events/battery_state_changed.h>
 #include <zmk/events/hid_indicators_changed.h>
+#include <zmk/events/activity_state_changed.h>
 #include <zmk/keymap.h>
 #include <zmk/split/bluetooth/peripheral.h>
 #include <zmk/usb.h>
@@ -61,6 +62,26 @@ static void set_indicator_color(uint8_t bits) {
         last_bits = bits;
     }
 }
+
+// Deep sleep (CONFIG_ZMK_SLEEP) is nRF52 System OFF, which retains GPIO output
+// state, and Zephyr's gpio-leds driver has no PM hook. Without this, a lit
+// indicator (e.g. Caps Lock) would stay on for the whole sleep and drain the
+// battery. ZMK raises ZMK_ACTIVITY_SLEEP right before suspending devices.
+static volatile bool indicator_sleeping = false;
+
+static int activity_state_listener(const zmk_event_t *eh) {
+    struct zmk_activity_state_changed *ev = as_zmk_activity_state_changed(eh);
+    if (ev != NULL) {
+        indicator_sleeping = (ev->state == ZMK_ACTIVITY_SLEEP);
+        if (indicator_sleeping) {
+            set_indicator_color(0);
+        }
+    }
+    return 0;
+}
+
+ZMK_LISTENER(klink_indicator_activity, activity_state_listener);
+ZMK_SUBSCRIPTION(klink_indicator_activity, zmk_activity_state_changed);
 
 static void get_lock_indicators(void) {
     uint8_t state = zmk_hid_indicators_get_current_profile();
@@ -147,6 +168,10 @@ ZMK_SUBSCRIPTION(led_battery_listener, zmk_battery_state_changed);
 void led_process_thread(void) {
     while (true) {
         k_sleep(K_MSEC(20));
+        if (indicator_sleeping) {
+            set_indicator_color(0);
+            continue;
+        }
         static uint16_t led_timer_steps = 0;
         led_timer_steps++;
 
