@@ -14,6 +14,7 @@
 #endif
 
 #include <behaviors.dtsi>
+#include <behaviors/socd.dtsi>
 #include <dt-bindings/zmk/keys.h>
 #include <dt-bindings/zmk/pointing.h>
 #include <dt-bindings/zmk/bt.h>
@@ -79,6 +80,31 @@
         };
         
         trans: transparent { display-name = "_Trans"; };
+
+        // SOCD cleaners (nguyendown/zmk-behavior-socd). One-parameter behaviors:
+        // bind e.g. `&socd_lip A` and `&socd_lip D` on the same layer in ZMK Studio.
+        // Keys sharing one instance cancel each other; use a different instance
+        // for a second pair (e.g. W/S).
+        socd_lip: socd_last_input {
+            compatible = "zmk,behavior-socd";
+            #binding-cells = <1>;
+            bindings = <&kp>;
+            display-name = "SOCD Last-Input";
+        };
+        socd_fip: socd_first_input {
+            compatible = "zmk,behavior-socd";
+            #binding-cells = <1>;
+            bindings = <&kp>;
+            first-input-priority;
+            display-name = "SOCD First-Input";
+        };
+        socd_neu: socd_neutral {
+            compatible = "zmk,behavior-socd";
+            #binding-cells = <1>;
+            bindings = <&kp>;
+            neutral;
+            display-name = "SOCD Neutral";
+        };
         none: none { display-name = "Key(None)"; };
         
         #if 1
