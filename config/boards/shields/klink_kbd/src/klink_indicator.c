@@ -89,8 +89,9 @@ static void get_lock_indicators(void) {
     indicator_state.keylock = state;
 }
 
-static void hid_indicators_status_update_cb(const zmk_event_t *eh) {
+static int hid_indicators_status_update_cb(const zmk_event_t *eh) {
     get_lock_indicators();
+    return ZMK_EV_EVENT_BUBBLE;
 }
 
 ZMK_LISTENER(widget_hid_indicators_status, hid_indicators_status_update_cb);
@@ -122,8 +123,9 @@ static void ble_active_profile_update(void) {
     return;
 }
 
-static void ble_active_profile_update_cb(const zmk_event_t *eh) {
+static int ble_active_profile_update_cb(const zmk_event_t *eh) {
     ble_active_profile_update();
+    return ZMK_EV_EVENT_BUBBLE;
 }
 
 ZMK_LISTENER(ble_active_profile_listener, ble_active_profile_update_cb);
