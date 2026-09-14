@@ -12,7 +12,7 @@ jobs:
       TZ: Asia/Shanghai
     permissions:
       actions: write
-      contents: read
+      contents: write
     steps:
       - uses: actions/checkout@v6
 
@@ -48,3 +48,23 @@ jobs:
 
           [[ -n "$ARTIFACT_ID" ]] && \
             gh api -X DELETE repos/${{ github.repository }}/actions/artifacts/$ARTIFACT_ID
+
+      # Publish a GitHub Release for every successful build of main, mirroring the
+      # upstream release layout (tag fw_YYMMDD, asset firmware-<kbd>_zmk_<YYYYMMDD>.zip).
+      # A short commit hash keeps tags unique when main is built more than once a day.
+      - name: Create release
+        if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          SHORT_SHA=$(echo "${{ github.sha }}" | cut -c1-7)
+          TAG="fw_$(date +'%y%m%d')-${SHORT_SHA}"
+          NAME="${{ steps.meta.outputs.name }}"
+          (cd firmware && zip -r "../${NAME}.zip" .)
+          gh release create "${TAG}" "${NAME}.zip" \
+            --repo "${{ github.repository }}" \
+            --target "${{ github.sha }}" \
+            --title "${NAME}" \
+            --notes "Built from ${{ github.sha }} by run ${{ github.run_id }}.
+
+Flash: enter the bootloader (hold RESET 3 s, or battery switch off + hold Esc while plugging in USB), then copy the .uf2 for your layout to the KLINK-BOOT drive."
