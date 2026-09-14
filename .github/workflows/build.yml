@@ -61,10 +61,10 @@ jobs:
           TAG="fw_$(date +'%y%m%d')-${SHORT_SHA}"
           NAME="${{ steps.meta.outputs.name }}"
           (cd firmware && zip -r "../${NAME}.zip" .)
+          NOTES="Built from ${{ github.sha }} by run ${{ github.run_id }}."
+          NOTES="${NOTES}"$'\n\n'"Flash: enter the bootloader (hold RESET 3 s, or battery switch off + hold Esc while plugging in USB), then copy the .uf2 for your layout to the KLINK-BOOT drive."
           gh release create "${TAG}" "${NAME}.zip" \
             --repo "${{ github.repository }}" \
             --target "${{ github.sha }}" \
             --title "${NAME}" \
-            --notes "Built from ${{ github.sha }} by run ${{ github.run_id }}.
-
-Flash: enter the bootloader (hold RESET 3 s, or battery switch off + hold Esc while plugging in USB), then copy the .uf2 for your layout to the KLINK-BOOT drive."
+            --notes "${NOTES}"
