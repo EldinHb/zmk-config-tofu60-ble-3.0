@@ -14,14 +14,18 @@
  * cleared by a power-on reset. Switching the battery off and on always boots
  * the keyboard unlocked.
  *
- * Both hooks are linker wraps (see CMakeLists.txt): ZMK raises no event before
- * soft off, and our event listeners run after the keymap's, too late to
- * swallow a key press.
+ * While guarding, Bluetooth advertising is held back, so no host can connect
+ * before the unlock. ZMK's last advertising request is replayed on unlock.
+ *
+ * All hooks are linker wraps (see CMakeLists.txt): ZMK raises no event before
+ * soft off or advertising, and our event listeners run after the keymap's, too
+ * late to swallow a key press.
  */
 
 #include <zephyr/init.h>
 #include <zephyr/kernel.h>
 #include <zephyr/logging/log.h>
+#include <zephyr/bluetooth/bluetooth.h>
 #include <hal/nrf_power.h>
 
 #include <zmk/events/position_state_changed.h>
@@ -54,6 +58,57 @@ static uint64_t swallowed;  // positions whose press was swallowed, until releas
 
 int __real_zmk_pm_soft_off(void);
 int __real_raise_zmk_position_state_changed(struct zmk_position_state_changed ev);
+int __real_bt_le_adv_start(const struct bt_le_adv_param *param, const struct bt_data *ad,
+                           size_t ad_len, const struct bt_data *sd, size_t sd_len);
+int __real_bt_le_adv_stop(void);
+
+// Advertising requested by ZMK while guarding. The param is copied because ZMK
+// passes a compound literal; ad/sd point at ZMK's static data.
+static K_MUTEX_DEFINE(adv_lock);
+static bool adv_pending;
+static struct bt_le_adv_param adv_param;
+static const struct bt_data *adv_ad, *adv_sd;
+static size_t adv_ad_len, adv_sd_len;
+
+int __wrap_bt_le_adv_start(const struct bt_le_adv_param *param, const struct bt_data *ad,
+                           size_t ad_len, const struct bt_data *sd, size_t sd_len) {
+    k_mutex_lock(&adv_lock, K_FOREVER);
+    if (guarding) {
+        adv_pending = true;
+        adv_param = *param;
+        adv_ad = ad;
+        adv_ad_len = ad_len;
+        adv_sd = sd;
+        adv_sd_len = sd_len;
+        k_mutex_unlock(&adv_lock);
+        LOG_DBG("Lock guard: holding back advertising");
+        return 0;
+    }
+    k_mutex_unlock(&adv_lock);
+    return __real_bt_le_adv_start(param, ad, ad_len, sd, sd_len);
+}
+
+int __wrap_bt_le_adv_stop(void) {
+    k_mutex_lock(&adv_lock, K_FOREVER);
+    adv_pending = false;
+    k_mutex_unlock(&adv_lock);
+    return __real_bt_le_adv_stop();
+}
+
+static void unlock(void) {
+    k_mutex_lock(&adv_lock, K_FOREVER);
+    guarding = false;
+    bool start = adv_pending;
+    adv_pending = false;
+    k_mutex_unlock(&adv_lock);
+
+    if (start) {
+        int err = __real_bt_le_adv_start(&adv_param, adv_ad, adv_ad_len, adv_sd, adv_sd_len);
+        if (err < 0 && err != -EALREADY) {
+            LOG_ERR("Lock guard: failed to start advertising (%d)", err);
+        }
+    }
+}
 
 int __wrap_zmk_pm_soft_off(void) {
     nrf_power_gpregret_set(NRF_POWER, LOCK_GPREGRET, LOCK_MAGIC);
@@ -95,7 +150,7 @@ static void relock(void) {
     if (err < 0) {
         // Still on: unlock rather than leave a keyboard that swallows every key.
         LOG_ERR("Lock guard: failed to lock again (%d), unlocking", err);
-        guarding = false;
+        unlock();
     }
 }
 
@@ -104,8 +159,8 @@ static void unlock_work_cb(struct k_work *work) {
 
     if (guarding && combo != 0 && held == combo) {
         LOG_INF("Lock guard: unlocked");
-        guarding = false;
         nrf_power_gpregret_set(NRF_POWER, LOCK_GPREGRET, 0);
+        unlock();
     }
 }
 
