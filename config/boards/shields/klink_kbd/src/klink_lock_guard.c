@@ -17,6 +17,14 @@
  * While guarding, Bluetooth advertising is held back, so no host can connect
  * before the unlock. ZMK's last advertising request is replayed on unlock.
  *
+ * Before any System OFF, the key matrix columns are driven explicitly. The
+ * columns sit behind a 595 shift register on SPI, and ZMK suspends SPI before
+ * it sets up the wake source, so otherwise they keep whatever the last scan
+ * left. Mid-scan (keys held, e.g. in a bag) that is "all inactive", and no key
+ * can wake the keyboard until a power-on reset. The rows' wake sense is set
+ * at the last moment too, since a held key leaves the matrix polling with its
+ * row interrupts off.
+ *
  * All hooks are linker wraps (see CMakeLists.txt): ZMK raises no event before
  * soft off or advertising, and our event listeners run after the keymap's, too
  * late to swallow a key press.
@@ -26,8 +34,14 @@
 #include <zephyr/kernel.h>
 #include <zephyr/logging/log.h>
 #include <zephyr/bluetooth/bluetooth.h>
+#include <zephyr/drivers/gpio.h>
+#include <zephyr/sys/poweroff.h>
+#include <hal/nrf_gpio.h>
 #include <hal/nrf_power.h>
+#include <soc.h>
 
+#include <zmk/activity.h>
+#include <zmk/events/activity_state_changed.h>
 #include <zmk/events/position_state_changed.h>
 #include <zmk/matrix_transform.h>
 #include <zmk/physical_layouts.h>
@@ -110,8 +124,32 @@ static void unlock(void) {
     }
 }
 
+#define KSCAN_NODE DT_NODELABEL(kscan0)
+#define WAKE_NODE DT_NODELABEL(wakeup_scan)
+
+#define COL_BIT(node, prop, idx) | BIT(DT_GPIO_PIN_BY_IDX(node, prop, idx))
+#define ROW_PSEL(node, prop, idx) NRF_DT_GPIOS_TO_PSEL_BY_IDX(node, prop, idx),
+
+// All matrix columns are active-low outputs of the shift register.
+static const struct device *shifter = DEVICE_DT_GET(DT_GPIO_CTLR(WAKE_NODE, col_gpios));
+static const gpio_port_pins_t col_mask = 0 DT_FOREACH_PROP_ELEM(KSCAN_NODE, col_gpios, COL_BIT);
+static const gpio_port_pins_t wake_col = BIT(DT_GPIO_PIN(WAKE_NODE, col_gpios));
+static const uint32_t rows[] = {DT_FOREACH_PROP_ELEM(KSCAN_NODE, row_gpios, ROW_PSEL)};
+static const uint32_t wake_row = NRF_DT_GPIOS_TO_PSEL(WAKE_NODE, row_gpios);
+
+// Drive the given columns active and the rest inactive. Must run while SPI is
+// still up, i.e. before ZMK suspends devices.
+static void drive_columns(gpio_port_pins_t active) {
+    int err = gpio_port_set_masked_raw(shifter, col_mask, col_mask & ~active);
+    if (err < 0) {
+        LOG_ERR("Lock guard: failed to set wake columns (%d)", err);
+    }
+}
+
 int __wrap_zmk_pm_soft_off(void) {
     nrf_power_gpregret_set(NRF_POWER, LOCK_GPREGRET, LOCK_MAGIC);
+    // Only F wakes from KBD Lock (see wakeup_scan in common.overlay).
+    drive_columns(wake_col);
     int err = __real_zmk_pm_soft_off();
     if (err < 0) {
         nrf_power_gpregret_set(NRF_POWER, LOCK_GPREGRET, 0);
@@ -236,6 +274,46 @@ static int lock_guard_early_init(void) {
 SYS_INIT(lock_guard_early_init, PRE_KERNEL_1, 0);
 
 // Timers and work queues are only usable later.
+// ZMK raises ZMK_ACTIVITY_SLEEP right before idle deep sleep, still with SPI up.
+static int activity_state_listener(const zmk_event_t *eh) {
+    struct zmk_activity_state_changed *ev = as_zmk_activity_state_changed(eh);
+    if (ev == NULL || ev->state != ZMK_ACTIVITY_SLEEP) {
+        return ZMK_EV_EVENT_BUBBLE;
+    }
+
+    if (guarding) {
+        // Swallowed presses don't count as activity, so this happens 30 min
+        // into guarding while keys are held. Lock rather than idle sleep: if
+        // F is held it wakes straight back up, which is still recoverable.
+        LOG_INF("Lock guard: idle while guarding, locking again");
+        zmk_pm_soft_off();
+        return ZMK_EV_EVENT_BUBBLE;
+    }
+
+    // Idle sleep wakes on any key: all columns active (rows: see below).
+    drive_columns(col_mask);
+    return ZMK_EV_EVENT_BUBBLE;
+}
+
+ZMK_LISTENER(klink_lock_guard, activity_state_listener);
+ZMK_SUBSCRIPTION(klink_lock_guard, zmk_activity_state_changed);
+
+FUNC_NORETURN void __real_sys_poweroff(void);
+
+// Last step of both KBD Lock and idle sleep. With interrupts off nothing can
+// undo this; a key already held makes System OFF wake straight back up.
+FUNC_NORETURN void __wrap_sys_poweroff(void) {
+    (void)irq_lock();
+    if (nrf_power_gpregret_get(NRF_POWER, LOCK_GPREGRET) == LOCK_MAGIC) {
+        nrf_gpio_cfg_sense_input(wake_row, NRF_GPIO_PIN_PULLUP, NRF_GPIO_PIN_SENSE_LOW);
+    } else {
+        for (size_t i = 0; i < ARRAY_SIZE(rows); i++) {
+            nrf_gpio_cfg_sense_input(rows[i], NRF_GPIO_PIN_PULLUP, NRF_GPIO_PIN_SENSE_LOW);
+        }
+    }
+    __real_sys_poweroff();
+}
+
 static int lock_guard_init(void) {
     if (guarding) {
         LOG_INF("Lock guard: woke from KBD Lock, waiting for unlock combination");

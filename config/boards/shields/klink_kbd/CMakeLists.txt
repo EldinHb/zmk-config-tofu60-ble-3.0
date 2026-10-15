@@ -11,4 +11,5 @@ zephyr_ld_options(
   -Wl,--wrap=raise_zmk_position_state_changed
   -Wl,--wrap=bt_le_adv_start
   -Wl,--wrap=bt_le_adv_stop
+  -Wl,--wrap=sys_poweroff
 )
